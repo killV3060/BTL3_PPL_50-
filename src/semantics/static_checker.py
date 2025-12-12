@@ -43,8 +43,9 @@ class StaticChecker(ASTVisitor):
         self.loop_depth: int = 0
         self.has_main: bool = False
         self.in_constructor: bool = False
+        self.currently_initializing_attr: Optional[str] = None
 
-    def check_program(self, ast: Program, require_main: bool = False):
+    def check_program(self, ast: Program, require_main: bool = True):
         self._build_class_table(ast)
         self._add_io_class()
         self.visitProgram(ast)
@@ -70,8 +71,24 @@ class StaticChecker(ASTVisitor):
                     "readFloat": {"returnType": PrimitiveType("float"), "params": [], "isStatic": True},
                     "readString": {"returnType": PrimitiveType("void"), "params": [], "isStatic": True},
                     "readBool": {"returnType": PrimitiveType("boolean"), "params": [], "isStatic": True},
-                }
+                },
+                "constructors": {},
+                "destructor": None
             }
+
+    def _get_constructor_signature(self, params):
+        return tuple(self._get_type_signature(p.param_type) for p in (params or []))
+    
+    def _get_type_signature(self, t):
+        if isinstance(t, PrimitiveType):
+            return t.type_name
+        if isinstance(t, ClassType):
+            return t.class_name
+        if isinstance(t, ArrayType):
+            return f"{self._get_type_signature(t.element_type)}[{t.size}]"
+        if isinstance(t, ReferenceType):
+            return f"{self._get_type_signature(t.referenced_type)}&"
+        return str(t)
 
     def _build_class_table(self, ast: Program):
         self.class_table = {}
@@ -85,7 +102,13 @@ class StaticChecker(ASTVisitor):
             if name in self.class_table:
                 raise Redeclared("Class", name)
             parent = c.superclass
-            self.class_table[name] = {"parent": parent, "attributes": {}, "methods": {}}
+            self.class_table[name] = {
+                "parent": parent, 
+                "attributes": {}, 
+                "methods": {},
+                "constructors": {},
+                "destructor": None
+            }
 
         for name, info in self.class_table.items():
             parent = info["parent"]
@@ -97,12 +120,26 @@ class StaticChecker(ASTVisitor):
                 continue
             cname = c.name
             info = self.class_table[cname]
+            
+            declared_names = set()
+            has_class_name_constructor = False
+            has_class_name_destructor = False
+            
             for m in c.members or []:
                 if isinstance(m, AttributeDecl):
                     for a in m.attributes or []:
                         aname = a.name
-                        if aname in info["attributes"]:
-                            raise Redeclared("Attribute", aname)
+                        if aname in declared_names:
+                            if m.is_final:
+                                raise Redeclared("Constant", aname)
+                            else:
+                                raise Redeclared("Attribute", aname)
+                        if aname == cname and (has_class_name_constructor or has_class_name_destructor):
+                            if m.is_final:
+                                raise Redeclared("Constant", aname)
+                            else:
+                                raise Redeclared("Attribute", aname)
+                        declared_names.add(aname)
                         info["attributes"][aname] = {
                             "type": m.attr_type,
                             "isFinal": m.is_final,
@@ -111,8 +148,11 @@ class StaticChecker(ASTVisitor):
                         }
                 elif isinstance(m, MethodDecl):
                     mname = m.name
-                    if mname in info["methods"]:
+                    if mname in declared_names:
                         raise Redeclared("Method", mname)
+                    if mname == cname and (has_class_name_constructor or has_class_name_destructor):
+                        raise Redeclared("Method", mname)
+                    declared_names.add(mname)
                     info["methods"][mname] = {
                         "returnType": m.return_type,
                         "params": m.params or [],
@@ -124,19 +164,38 @@ class StaticChecker(ASTVisitor):
                         len(m.params or []) == 0):
                         self.has_main = True
                 elif isinstance(m, ConstructorDecl):
-                    cname_m = cname
-                    if cname_m in info["methods"]:
-                        raise Redeclared("Method", cname_m)
-                    info["methods"][cname_m] = {
+                    cons_name = m.name
+                    if cons_name in declared_names:
+                        raise Redeclared("Constructor", cons_name)
+                    
+                    sig = self._get_constructor_signature(m.params)
+                    if sig in info["constructors"]:
+                        raise Redeclared("Constructor", cname)
+                    
+                    if cons_name != cname:
+                        declared_names.add(cons_name)
+                    else:
+                        has_class_name_constructor = True
+                    
+                    info["constructors"][sig] = {
                         "returnType": ClassType(cname),
                         "params": m.params or [],
                         "isStatic": False
                     }
                 elif isinstance(m, DestructorDecl):
-                    dname = "~" + cname
-                    if dname in info["methods"]:
-                        raise Redeclared("Method", dname)
-                    info["methods"][dname] = {
+                    dname = m.name
+                    if dname in declared_names:
+                        raise Redeclared("Destructor", dname)
+                    
+                    if info["destructor"] is not None:
+                        raise Redeclared("Destructor", cname)
+                    
+                    if dname != cname:
+                        declared_names.add(dname)
+                    else:
+                        has_class_name_destructor = True
+                    
+                    info["destructor"] = {
                         "returnType": None,
                         "params": [],
                         "isStatic": False
@@ -154,7 +213,10 @@ class StaticChecker(ASTVisitor):
             self.enter_scope()
         cur = self.scopes[-1]
         if name in cur:
-            raise Redeclared("Variable", name)
+            if isFinal:
+                raise Redeclared("Constant", name)
+            else:
+                raise Redeclared("Variable", name)
         cur[name] = {"type": typeNode, "isFinal": isFinal, "initialized": initialized}
 
     def declare_param(self, name: str, typeNode: Any):
@@ -171,6 +233,8 @@ class StaticChecker(ASTVisitor):
         return None
 
     def lookup_in_class_attrs(self, class_name: str, attr: str):
+        if self.currently_initializing_attr == attr and class_name == self.current_class:
+            return None
         cur = class_name
         visited = set()
         while cur and cur not in visited:
@@ -191,6 +255,13 @@ class StaticChecker(ASTVisitor):
                 return clsinfo["methods"][method_name]
             cur = clsinfo["parent"] if clsinfo else None
         return None
+    
+    def lookup_constructor(self, class_name: str, arg_types: List):
+        clsinfo = self.class_table.get(class_name)
+        if not clsinfo:
+            return None
+        sig = tuple(self._get_type_signature(t) for t in arg_types)
+        return clsinfo["constructors"].get(sig)
 
     def type_name(self, t: Any) -> str:
         if t is None:
@@ -222,6 +293,20 @@ class StaticChecker(ASTVisitor):
 
     def is_class_type(self, t: Any) -> bool:
         return isinstance(t, ClassType)
+
+    def _require_class_defined(self, type_node):
+        if isinstance(type_node, ClassType):
+            cname = type_node.class_name
+            if cname == "nil" or cname == self.current_class:
+                return
+            if cname not in self.class_table:
+                raise UndeclaredClass(cname)
+            if hasattr(self, 'visited_classes') and cname not in self.visited_classes:
+                raise UndeclaredClass(cname)
+        elif isinstance(type_node, ArrayType):
+            self._require_class_defined(type_node.element_type)
+        elif isinstance(type_node, ReferenceType):
+            self._require_class_defined(type_node.referenced_type)
 
     def same_type(self, a: Any, b: Any) -> bool:
         if a is ERROR or b is ERROR:
@@ -265,7 +350,7 @@ class StaticChecker(ASTVisitor):
         if self.is_class_type(actual) and self.is_class_type(expected):
             return self.is_subtype(actual, expected)
         if self.is_array_type(expected) and self.is_array_type(actual):
-            return (self.compatible(expected.element_type, actual.element_type) and 
+            return (self.same_type(expected.element_type, actual.element_type) and 
                     expected.size == actual.size)
         return False
 
@@ -333,6 +418,7 @@ class StaticChecker(ASTVisitor):
         return None
 
     def visitProgram(self, ast: Program):
+        self.visited_classes = set()
         self.enter_scope()
         self.scopes[-1]["io"] = {"type": ClassType("IO"), "isFinal": True, "initialized": True}
         for cls in ast.class_decls or []:
@@ -348,10 +434,13 @@ class StaticChecker(ASTVisitor):
             if mem:
                 self.visit(mem)
         self.exit_scope()
+        self.visited_classes.add(ast.name)
         self.current_class = None
 
     def visitAttributeDecl(self, ast: AttributeDecl):
+        self._require_class_defined(ast.attr_type)
         for attr in ast.attributes or []:
+            self.currently_initializing_attr = attr.name
             if ast.is_final:
                 if attr.init_value is None:
                     pass
@@ -373,6 +462,7 @@ class StaticChecker(ASTVisitor):
                 init_type = self.visit(attr.init_value)
                 if init_type is not ERROR and not self.compatible(ast.attr_type, init_type):
                     raise TypeMismatchInStatement(ast)
+            self.currently_initializing_attr = None
 
     def visitMethodDecl(self, ast: MethodDecl):
         self.current_method = ast.name
@@ -381,10 +471,11 @@ class StaticChecker(ASTVisitor):
         self.enter_scope()
         
         for param in ast.params or []:
+            self._require_class_defined(param.param_type)
             self.declare_param(param.name, param.param_type)
         
         if ast.body:
-            self.visitBlockStatement(ast.body)
+            self._visitBlockStatementContent(ast.body)
         
         self.exit_scope()
         self.current_method = None
@@ -392,16 +483,20 @@ class StaticChecker(ASTVisitor):
         self.current_method_is_static = False
 
     def visitConstructorDecl(self, ast: ConstructorDecl):
+        if ast.name != self.current_class:
+            raise TypeMismatchInStatement(ast)
+        
         self.current_method = ast.name
         self.current_method_return_type = ClassType(self.current_class) if self.current_class else None
         self.in_constructor = True
         self.enter_scope()
         
         for param in ast.params or []:
+            self._require_class_defined(param.param_type)
             self.declare_param(param.name, param.param_type)
         
         if ast.body:
-            self.visitBlockStatement(ast.body)
+            self._visitBlockStatementContent(ast.body)
         
         self.exit_scope()
         self.current_method = None
@@ -409,25 +504,32 @@ class StaticChecker(ASTVisitor):
         self.in_constructor = False
 
     def visitDestructorDecl(self, ast: DestructorDecl):
+        if ast.name != self.current_class:
+            raise TypeMismatchInStatement(ast)
+        
         self.current_method = "~" + ast.name
         self.current_method_return_type = None
         self.enter_scope()
         if ast.body:
-            self.visitBlockStatement(ast.body)
+            self._visitBlockStatementContent(ast.body)
         self.exit_scope()
         self.current_method = None
 
-    def visitBlockStatement(self, ast: BlockStatement):
-        self.enter_scope()
+    def _visitBlockStatementContent(self, ast: BlockStatement):
         for vdecl in ast.var_decls or []:
             if vdecl:
                 self.visitVariableDecl(vdecl)
         for stmt in ast.statements or []:
             if stmt:
                 self.visit(stmt)
+
+    def visitBlockStatement(self, ast: BlockStatement):
+        self.enter_scope()
+        self._visitBlockStatementContent(ast)
         self.exit_scope()
 
     def visitVariableDecl(self, ast: VariableDecl):
+        self._require_class_defined(ast.var_type)
         for var in ast.variables or []:
             if var.init_value:
                 if ast.is_final:
@@ -440,10 +542,8 @@ class StaticChecker(ASTVisitor):
                     init_node = var.init_value
                     init_type = self.visit(init_node)
                     if init_type is not ERROR and not self.compatible(ast.var_type, init_type):
-                        if isinstance(init_node, (UnaryOp, BinaryOp, PostfixExpression, MethodCall,
-                                                ParenthesizedExpression, ArrayAccess, Identifier)):
+                        if init_type is None or (isinstance(init_type, PrimitiveType) and init_type.type_name == "void"):
                             raise TypeMismatchInExpression(init_node)
-                        # Fallback: statement-level error
                         raise TypeMismatchInStatement(ast)
 
 
@@ -454,16 +554,7 @@ class StaticChecker(ASTVisitor):
             name = ast.lhs.name
             info = self.lookup(name)
             if info is None:
-                if self.current_class:
-                    attr = self.lookup_in_class_attrs(self.current_class, name)
-                    if attr:
-                        if attr.get("isFinal") and not self.in_constructor:
-                            raise CannotAssignToConstant(ast)
-                        lhs_type = attr["type"]
-                    else:
-                        raise UndeclaredIdentifier(name)
-                else:
-                    raise UndeclaredIdentifier(name)
+                raise UndeclaredIdentifier(name)
             else:
                 if info.get("isFinal"):
                     raise CannotAssignToConstant(ast)
@@ -485,14 +576,6 @@ class StaticChecker(ASTVisitor):
             return
         
         if not self.compatible(lhs_type, rhs_type):
-            # If rhs is a call expression, report expression-level error
-            rhs_node = ast.rhs
-            if isinstance(rhs_node, PostfixExpression) and any(isinstance(op, MethodCall) for op in (rhs_node.postfix_ops or [])):
-                raise TypeMismatchInExpression(rhs_node)
-            # if rhs is other expression (e.g. array access) we may want Expression-level too:
-            if isinstance(rhs_node, (PostfixExpression, BinaryOp, UnaryOp, ParenthesizedExpression, MethodCall)):
-                raise TypeMismatchInExpression(rhs_node)
-            # fallback: statement-level
             raise TypeMismatchInStatement(ast)
 
 
@@ -519,7 +602,7 @@ class StaticChecker(ASTVisitor):
                         raise UndeclaredAttribute(op.member_name)
                     if not attr_info.get("isStatic", False):
                         raise IllegalMemberAccess(pexpr)
-                    if is_last and attr_info.get("isFinal") and not self.in_constructor:
+                    if is_last and attr_info.get("isFinal"):
                         raise CannotAssignToConstant(stmt)
                     current_type = attr_info["type"]
                     is_class_name_access = False
@@ -532,7 +615,7 @@ class StaticChecker(ASTVisitor):
                         raise UndeclaredAttribute(op.member_name)
                     if attr_info.get("isStatic", False):
                         raise IllegalMemberAccess(pexpr)
-                    if is_last and attr_info.get("isFinal") and not self.in_constructor:
+                    if is_last and attr_info.get("isFinal"):
                         raise CannotAssignToConstant(stmt)
                     current_type = attr_info["type"]
             elif isinstance(op, ArrayAccess):
@@ -562,17 +645,7 @@ class StaticChecker(ASTVisitor):
         var_name = ast.variable
         info = self.lookup(var_name)
         if info is None:
-            if self.current_class:
-                attr = self.lookup_in_class_attrs(self.current_class, var_name)
-                if attr:
-                    if attr.get("isFinal"):
-                        raise CannotAssignToConstant(ast)
-                    if not self.is_int_type(attr["type"]):
-                        raise TypeMismatchInStatement(ast)
-                else:
-                    raise UndeclaredIdentifier(var_name)
-            else:
-                raise UndeclaredIdentifier(var_name)
+            raise UndeclaredIdentifier(var_name)
         else:
             if info.get("isFinal"):
                 raise CannotAssignToConstant(ast)
@@ -624,12 +697,7 @@ class StaticChecker(ASTVisitor):
             raise TypeMismatchInStatement(ast)
 
     def visitMethodInvocationStatement(self, ast: MethodInvocationStatement):
-        try:
-            call_t = self.visit(ast.method_call)
-        except TypeMismatchInExpression:
-            raise TypeMismatchInStatement(ast)
-        if call_t is not ERROR and call_t is not None and self.type_name(call_t) != "void":
-            raise TypeMismatchInStatement(ast)
+        self.visit(ast.method_call)
 
     def visitBinaryOp(self, ast: BinaryOp):
         left_t = self.visit(ast.left)
@@ -638,9 +706,15 @@ class StaticChecker(ASTVisitor):
         if left_t is ERROR or right_t is ERROR:
             return ERROR
         
-        if op in ['+', '-', '*', '/', '\\', '%']:
+        if op in ['+', '-', '*', '\\', '%']:
             if self.is_int_type(left_t) and self.is_int_type(right_t):
                 return PrimitiveType("int")
+            if ((self.is_int_type(left_t) or self.is_float_type(left_t)) and
+                (self.is_int_type(right_t) or self.is_float_type(right_t))):
+                return PrimitiveType("float")
+            raise TypeMismatchInExpression(ast)
+        
+        if op == '/':
             if ((self.is_int_type(left_t) or self.is_float_type(left_t)) and
                 (self.is_int_type(right_t) or self.is_float_type(right_t))):
                 return PrimitiveType("float")
@@ -653,10 +727,9 @@ class StaticChecker(ASTVisitor):
             raise TypeMismatchInExpression(ast)
         
         if op in ['==', '!=']:
-            if self.same_type(left_t, right_t):
+            if self.is_int_type(left_t) and self.is_int_type(right_t):
                 return PrimitiveType("boolean")
-            if (self.is_int_type(left_t) and self.is_float_type(right_t)) or \
-               (self.is_float_type(left_t) and self.is_int_type(right_t)):
+            if self.is_bool_type(left_t) and self.is_bool_type(right_t):
                 return PrimitiveType("boolean")
             if isinstance(ast.left, NilLiteral) or isinstance(ast.right, NilLiteral):
                 if (self.is_class_type(left_t) or self.is_array_type(left_t) or 
@@ -725,7 +798,7 @@ class StaticChecker(ASTVisitor):
                     is_io_access = False
                 else:
                     if not isinstance(current_type, ClassType):
-                        raise TypeMismatchInExpression(ast)
+                        raise TypeMismatchInExpression(ast.primary)
                     cls_name = current_type.class_name
                     attr_info = self.lookup_in_class_attrs(cls_name, member_name)
                     if attr_info is None:
@@ -739,7 +812,7 @@ class StaticChecker(ASTVisitor):
                 if not self.is_array_type(current_type):
                     raise TypeMismatchInExpression(ast)
                 if idx_type is not ERROR and not self.is_int_type(idx_type):
-                    raise TypeMismatchInExpression(ast)
+                    raise TypeMismatchInExpression(op)
                 current_type = current_type.element_type
             elif isinstance(op, MethodCall):
                 method_name = op.method_name
@@ -805,18 +878,28 @@ class StaticChecker(ASTVisitor):
         if class_name not in self.class_table:
             raise UndeclaredClass(class_name)
         arg_types = [self.visit(arg) for arg in (ast.args or [])]
-        constructor_info = self.lookup_method(class_name, class_name)
+        clsinfo = self.class_table.get(class_name)
+        constructors = clsinfo.get("constructors", {})
+        
         if len(arg_types) == 0:
             pass
-        elif constructor_info:
-            params = constructor_info.get("params", [])
-            if len(params) != len(arg_types):
-                raise TypeMismatchInExpression(ast)
-            for p, a in zip(params, arg_types):
-                if a is not ERROR and not self.compatible(p.param_type, a):
+        elif constructors:
+            sig = tuple(self._get_type_signature(t) for t in arg_types if t is not ERROR)
+            if sig not in constructors:
+                found = False
+                for cons_sig, cons_info in constructors.items():
+                    params = cons_info.get("params", [])
+                    if len(params) == len(arg_types):
+                        match = True
+                        for p, a in zip(params, arg_types):
+                            if a is not ERROR and not self.compatible(p.param_type, a):
+                                match = False
+                                break
+                        if match:
+                            found = True
+                            break
+                if not found and constructors:
                     raise TypeMismatchInExpression(ast)
-        else:
-            raise TypeMismatchInExpression(ast)
         return ClassType(class_name)
 
     def visitParenthesizedExpression(self, ast: ParenthesizedExpression):
@@ -840,7 +923,6 @@ class StaticChecker(ASTVisitor):
     def visitArrayLiteral(self, ast: ArrayLiteral):
         elements = ast.value or []
         if not elements:
-            # mảng rỗng → vẫn hợp lệ, trả về kiểu void[0] hoặc có thể raise tùy yêu cầu đề
             return ArrayType(PrimitiveType("void"), 0)
         
         first_type = self.visit(elements[0])
