@@ -697,7 +697,10 @@ class StaticChecker(ASTVisitor):
             raise TypeMismatchInStatement(ast)
 
     def visitMethodInvocationStatement(self, ast: MethodInvocationStatement):
-        self.visit(ast.method_call)
+        try:
+            self.visit(ast.method_call)
+        except TypeMismatchInExpression:
+            raise TypeMismatchInStatement(ast)
 
     def visitBinaryOp(self, ast: BinaryOp):
         left_t = self.visit(ast.left)

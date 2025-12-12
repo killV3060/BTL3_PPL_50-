@@ -709,7 +709,8 @@ class BoolLiteral(Literal):
         return visitor.visit_bool_literal(self, o)
 
     def __str__(self):
-        return f"BoolLiteral({self.value})"
+        val_str = "True" if self.value else "False"
+        return f"BoolLiteral({val_str})"
 
 
 class StringLiteral(Literal):

@@ -21,7 +21,7 @@ def emit(self):
 }
 
 options{
-	language=Python3;
+        language=Python3;
 }
 
 program: class_decl_list EOF; // write for program rule here using vardecl and funcdecl
@@ -145,7 +145,7 @@ COMMENT: ('/*' .*? ('*/' | EOF) | '#' ~[\r\n]* ('\n' | EOF)) -> skip;
     //Block statement:
     blockstm: LB var_decl_stm stmlist RB;
     stmlist: stm stmlist| ; //Note: Added stmlist to have recursive
-    stm: assingstm | ifstm | forstm | breakstm | continuestm | returnstm | invocationstm;
+    stm: assingstm | ifstm | forstm | breakstm | continuestm | returnstm | invocationstm | blockstm;
 
         //Assign statement
         assingstm: (ID | ID LSB expr RSB | invocationstm_frame) vardecl_assign SEMI; //Added SEMI

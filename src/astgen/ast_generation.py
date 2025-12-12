@@ -381,6 +381,8 @@ class ASTGeneration(OPLangVisitor):
             return self.visit(ctx.continuestm())
         elif ctx.returnstm():
             return self.visit(ctx.returnstm())
+        elif ctx.blockstm():
+            return self.visit(ctx.blockstm())
         else:  # invocationstm
             return self.visit(ctx.invocationstm())
 
@@ -621,7 +623,7 @@ class ASTGeneration(OPLangVisitor):
         elif ctx.STRINGLIT():
             return StringLiteral(ctx.STRINGLIT().getText())
         elif ctx.BOOLLIT():
-            return BoolLiteral(ctx.BOOLLIT().getText())
+            return BoolLiteral(ctx.BOOLLIT().getText() == 'true')
         elif ctx.ID():
             return Identifier(ctx.ID().getText())
         elif ctx.callfuncstm():
