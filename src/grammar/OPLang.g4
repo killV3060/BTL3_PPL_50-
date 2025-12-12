@@ -84,12 +84,11 @@ COMMENT: ('/*' .*? ('*/' | EOF) | '#' ~[\r\n]* ('\n' | EOF)) -> skip;
 
 
 //Array:
-    array: LB (arraylist_intlit | arraylist_floatlit | arraylist_stringlit | arraylist_nillit) RB;
+    // Array: allow 0..n elements of any expr (int, float, string, id, nested expr...)
+    array: LB array_element_list? RB;
 
-    arraylist_intlit: INTLIT COMMA arraylist_intlit | INTLIT;
-    arraylist_floatlit: FLOATLIT COMMA arraylist_floatlit | FLOATLIT;
-    arraylist_stringlit: STRINGLIT COMMA arraylist_stringlit | STRINGLIT;
-    arraylist_nillit: NIL COMMA arraylist_nillit | NIL;
+    array_element_list: expr (COMMA expr)* ;
+
 //Other special character:
     SEMI: ';';
     LB: '{';

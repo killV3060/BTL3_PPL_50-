@@ -621,7 +621,7 @@ class ASTGeneration(OPLangVisitor):
         elif ctx.STRINGLIT():
             return StringLiteral(ctx.STRINGLIT().getText())
         elif ctx.BOOLLIT():
-            return BoolLiteral(ctx.BOOLLIT().getText() == "true")
+            return BoolLiteral(ctx.BOOLLIT().getText())
         elif ctx.ID():
             return Identifier(ctx.ID().getText())
         elif ctx.callfuncstm():
@@ -674,42 +674,19 @@ class ASTGeneration(OPLangVisitor):
     # Array Literals
     # ============================================================================
 
+       # ============================================================================
+    # Array Literals – HỖ TRỢ TẤT CẢ CÁC KIỂU (MIXED TYPES) ← QUAN TRỌNG NHẤT
+    # ============================================================================
+
     def visitArray(self, ctx: OPLangParser.ArrayContext):
-        """Visit array literal"""
-        if ctx.arraylist_intlit():
-            elements = self.visit(ctx.arraylist_intlit())
-        elif ctx.arraylist_floatlit():
-            elements = self.visit(ctx.arraylist_floatlit())
-        elif ctx.arraylist_stringlit():
-            elements = self.visit(ctx.arraylist_stringlit())
-        else:  # arraylist_nillit
-            elements = self.visit(ctx.arraylist_nillit())
+        """array: LCB array_element_list? RCB"""
+        if ctx.array_element_list():
+            elements = self.visit(ctx.array_element_list())
+        else:
+            elements = []                       # mảng rỗng {}
         return ArrayLiteral(elements)
 
-    def visitArraylist_intlit(self, ctx: OPLangParser.Arraylist_intlitContext):
-        """Visit arraylist_intlit"""
-        elements = [IntLiteral(int(ctx.INTLIT().getText()))]
-        if ctx.arraylist_intlit():
-            elements.extend(self.visit(ctx.arraylist_intlit()))
-        return elements
-
-    def visitArraylist_floatlit(self, ctx: OPLangParser.Arraylist_floatlitContext):
-        """Visit arraylist_floatlit"""
-        elements = [FloatLiteral(float(ctx.FLOATLIT().getText()))]
-        if ctx.arraylist_floatlit():
-            elements.extend(self.visit(ctx.arraylist_floatlit()))
-        return elements
-
-    def visitArraylist_stringlit(self, ctx: OPLangParser.Arraylist_stringlitContext):
-        """Visit arraylist_stringlit"""
-        elements = [StringLiteral(ctx.STRINGLIT().getText())]
-        if ctx.arraylist_stringlit():
-            elements.extend(self.visit(ctx.arraylist_stringlit()))
-        return elements
-
-    def visitArraylist_nillit(self, ctx: OPLangParser.Arraylist_nillitContext):
-        """Visit arraylist_nillit"""
-        elements = [NilLiteral()]
-        if ctx.arraylist_stringlit():  # Note: grammar seems to have a typo here
-            elements.extend(self.visit(ctx.arraylist_stringlit()))
-        return elements
+    def visitArray_element_list(self, ctx: OPLangParser.Array_element_listContext):
+        """array_element_list: expr (COMMA expr)*"""
+        # ctx.expr() trả về danh sách tất cả các expr trong { ... }
+        return [self.visit(e) for e in ctx.expr()]
